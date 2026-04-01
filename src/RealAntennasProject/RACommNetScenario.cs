@@ -166,6 +166,7 @@ namespace RealAntennas
                 TechLevelInfo.Init(RAParamNode);
                 Targeting.TargetModeInfo.Init(RAParamNode);
                 HomeNodeTypes.Init(RAParamNode);
+                Physics.InitPlasma(RAParamNode);
                 RAParamNode.TryGetValue("minRelayTL", ref minRelayTL);
                 staticInit = true;
             }

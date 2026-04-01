@@ -30,18 +30,23 @@ namespace RealAntennas.Precompute
         [WriteOnly] public NativeArray<float3> rxDir;
         [WriteOnly] public NativeArray<float> rxAMW;
         [WriteOnly] public NativeArray<float> rxPrecalcNoise;
+        [WriteOnly] public NativeArray<float> rxPlasmaNoiseK;
+        [WriteOnly] public NativeArray<float> rxPlasmaDB;
 
         [WriteOnly] public NativeArray<double3> rxSurfaceNormal;
 
         public void Execute(int index)
         {
             int4 k = pairs[index];
+            CNInfo txNode = nodes[k.x];
             CNInfo rxNode = nodes[k.y];
             rxPrecalcNoise[index] = antennaNoise[k.w];
+            rxPlasmaNoiseK[index] = rxNode.plasmaRxNoiseK;
+            rxPlasmaDB[index] = rxNode.plasmaRxDB;
             rxSurfaceNormal[index] = rxNode.surfaceNormal;
             {
                 AntennaData tx = antennas[k.z];
-                txPower[index] = tx.txPower;
+                txPower[index] = tx.txPower - txNode.plasmaTxDB;
                 txFreq[index] = tx.freq;
                 txGain[index] = tx.gain;
                 txBeamwidth[index] = tx.beamwidth;
@@ -51,15 +56,15 @@ namespace RealAntennas.Precompute
                 txDir[index] = tx.isTracking ? (float3) (rx.position - tx.position) : tx.dir;
             }
             {
-              AntennaData rx = antennas[k.w];
-              rxFreq[index] = rx.freq;
-              rxGain[index] = rx.gain;
-              rxBeamwidth[index] = rx.beamwidth;
-              rxInAtmosphere[index] = rx.inAtmosphere;
-              rxTracking[index] = rx.isTracking;
-              rxPos[index] = rx.position;
-              rxAMW[index] = rx.AMW;
-              AntennaData tx = antennas[k.z];
+                AntennaData rx = antennas[k.w];
+                rxFreq[index] = rx.freq;
+                rxGain[index] = rx.gain;
+                rxBeamwidth[index] = rx.beamwidth;
+                rxInAtmosphere[index] = rx.inAtmosphere;
+                rxTracking[index] = rx.isTracking;
+                rxPos[index] = rx.position;
+                rxAMW[index] = rx.AMW;
+                AntennaData tx = antennas[k.z];
               rxDir[index] = rx.isTracking ? (float3) (tx.position - rx.position) : rx.dir;
             }
         }
@@ -124,12 +129,13 @@ namespace RealAntennas.Precompute
         [ReadOnly] public NativeArray<float> bodyNoise;
         [ReadOnly] public NativeArray<float> atmoNoise;
         [ReadOnly] public NativeArray<float> rxAMW;
+        [ReadOnly] public NativeArray<float> rxPlasmaNoiseK;
         [WriteOnly] public NativeArray<float> noiseTemp;
         [WriteOnly] public NativeArray<float> N0;
 
         public void Execute(int index)
         {
-            float vNoiseTemp = bodyNoise[index] + rxAMW[index] + atmoNoise[index] + Physics.CMB;
+            float vNoiseTemp = bodyNoise[index] + rxAMW[index] + atmoNoise[index] + rxPlasmaNoiseK[index] + Physics.CMB;
             noiseTemp[index] = vNoiseTemp;
             N0[index] = Physics.NoiseSpectralDensity(vNoiseTemp);
         }
@@ -182,11 +188,12 @@ namespace RealAntennas.Precompute
         [ReadOnly] public NativeArray<float> txPower;
         [ReadOnly] public NativeArray<float> pointLoss;
         [ReadOnly] public NativeArray<float> pathLoss;
+        [ReadOnly] public NativeArray<float> rxPlasmaDB;
         [WriteOnly] public NativeArray<float> rxPower;
 
         public void Execute(int index)
         {
-            rxPower[index] = txGain[index] + txPower[index] + rxGain[index] - pointLoss[index] - pathLoss[index];
+            rxPower[index] = txGain[index] + txPower[index] + rxGain[index] - pointLoss[index] - pathLoss[index] - rxPlasmaDB[index];
         }
     }
 

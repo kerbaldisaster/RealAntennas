@@ -1,4 +1,5 @@
-﻿using System;
+﻿using CommNet;
+using System;
 using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Jobs;
@@ -30,6 +31,9 @@ namespace RealAntennas.Precompute
         internal double3 surfaceNormal;
         internal bool isHome;
         internal bool canComm;
+        internal float plasmaTxDB;
+        internal float plasmaRxNoiseK;
+        internal float plasmaRxDB;
     }
 
     public struct OccluderInfo
@@ -89,6 +93,8 @@ namespace RealAntennas.Precompute
         private NativeArray<float3> rxDir;
         private NativeArray<float> rxAMW;
         private NativeArray<float> rxPrecalcNoise;
+        private NativeArray<float> rxPlasmaNoiseK;
+        private NativeArray<float> rxPlasmaDB;
         private NativeArray<double3> rxSurfaceNormal;
 
         private NativeArray<Encoder> matchedEncoder;
@@ -236,6 +242,8 @@ namespace RealAntennas.Precompute
             rxDir = new NativeArray<float3>(allAntennaPairs.Length, Allocator.TempJob);
             rxAMW = new NativeArray<float>(allAntennaPairs.Length, Allocator.TempJob);
             rxPrecalcNoise = new NativeArray<float>(allAntennaPairs.Length, Allocator.TempJob);
+            rxPlasmaNoiseK = new NativeArray<float>(allAntennaPairs.Length, Allocator.TempJob);
+            rxPlasmaDB = new NativeArray<float>(allAntennaPairs.Length, Allocator.TempJob);
             rxSurfaceNormal = new NativeArray<double3>(allAntennaPairs.Length, Allocator.TempJob);
 
             var extractDataJob = new ExtractDataJob
@@ -260,6 +268,8 @@ namespace RealAntennas.Precompute
                 txPower = txPower,
                 rxAMW = rxAMW,
                 rxPrecalcNoise = rxPrecalcNoise,
+                rxPlasmaNoiseK = rxPlasmaNoiseK,
+                rxPlasmaDB = rxPlasmaDB,
                 rxSurfaceNormal = rxSurfaceNormal
             }.Schedule(allValidAntennaPairs, 16, JobHandle.CombineDependencies(noisePrecalcHandle, allValidAntennaPairsHandle));
 
@@ -320,6 +330,7 @@ namespace RealAntennas.Precompute
                 txPower = txPower,
                 pathLoss = pathLoss,
                 pointLoss = pointingLoss,
+                rxPlasmaDB = rxPlasmaDB,
                 rxPower = rxPower
             }.Schedule(allValidAntennaPairs, 128, JobHandle.CombineDependencies(pathLossJob, pointingLossJob));
 
@@ -357,6 +368,7 @@ namespace RealAntennas.Precompute
                 bodyNoise = bodyNoise,
                 atmoNoise = atmosphereNoise,
                 rxAMW = rxAMW,
+                rxPlasmaNoiseK = rxPlasmaNoiseK,
                 noiseTemp = noiseTemp,
                 N0 = n0,
             }.Schedule(allValidAntennaPairs, 64, JobHandle.CombineDependencies(bodyNoiseJob, atmoNoiseJob));
@@ -479,18 +491,19 @@ namespace RealAntennas.Precompute
                         double RevMetric = 1.0 - ((float)rateSteps[row2] / (maxSteps[row2] + 1));
                         //RACN.MakeLink(fwdTx, fwdRx, revTx, revRx, a, b, (a.position - b.position).magnitude, fwd, rev, FwdBestDataRate, FwdMetric, RevMetric);
                         RACN.MakeLink(allAntennasReverse[fwdQuad.z],
-                            allAntennasReverse[fwdQuad.w],
-                            allAntennasReverse[revQuad.z],
-                            allAntennasReverse[revQuad.w],
-                            a,
-                            b,
-                            (a.position - b.position).magnitude,
-                            dataRate[row],
-                            dataRate[row2],
-                            maxDataRate[row],
-                            FwdMetric,
-                            RevMetric);
-                    } else
+                                        allAntennasReverse[fwdQuad.w],
+                                        allAntennasReverse[revQuad.z],
+                                        allAntennasReverse[revQuad.w],
+                                        a,
+                                        b,
+                                        (a.position - b.position).magnitude,
+                                        dataRate[row],
+                                        dataRate[row2],
+                                        maxDataRate[row],
+                                        FwdMetric,
+                                        RevMetric);
+                    }
+                    else
                     {
                         RACN.DoDisconnect(RACN.Nodes[pair.x], RACN.Nodes[pair.y]);
                     }
@@ -628,6 +641,8 @@ namespace RealAntennas.Precompute
             rxDir.Dispose();
             rxAMW.Dispose();
             rxPrecalcNoise.Dispose();
+            rxPlasmaNoiseK.Dispose();
+            rxPlasmaDB.Dispose();
             rxSurfaceNormal.Dispose();
 
             matchedEncoder.Dispose();
@@ -679,17 +694,108 @@ namespace RealAntennas.Precompute
                 foreach (RACommNode node in Nodes)
                 {
                     Vector3d surfN = node.GetSurfaceNormalVector();
+                    ComputePlasmaTerms(node, out float plasmaTxDB, out float plasmaRxNoiseK, out float plasmaRxDB);
                     infos.Add(new CNInfo()
                     {
                         position = new double3(node.precisePosition.x, node.precisePosition.y, node.precisePosition.z),
                         isHome = node.isHome,
                         canComm = forceValid || node.CanComm(),
                         surfaceNormal = new double3(surfN.x, surfN.y, surfN.z),
+                        plasmaTxDB = plasmaTxDB,
+                        plasmaRxNoiseK = plasmaRxNoiseK,
+                        plasmaRxDB = plasmaRxDB,
                         //name = $"{node}",
                     });
                 }
             }
             else infos = new NativeList<CNInfo>(Allocator.TempJob);
+        }
+
+        /// <summary>
+        /// Computes all node-level plasma terms once for this node:
+        ///   - transmit-side attenuation
+        ///   - receiver-side added plasma noise
+        ///   - receiver-side attenuation
+        ///
+        /// Returns zeros for ground stations, vessels not in plasma, when the
+        /// plasma blackout difficulty setting is disabled, or when no active
+        /// antenna frequency is available.
+        /// </summary>
+        private static void ComputePlasmaTerms(RACommNode node, out float plasmaTxDB, out float plasmaRxNoiseK, out float plasmaRxDB)
+        {
+            plasmaTxDB = 0f;
+            plasmaRxNoiseK = 0f;
+            plasmaRxDB = 0f;
+
+            float severity = GetPlasmaSeverity(node, out float bestFreqHz);
+            if (severity <= 0f || bestFreqHz <= 0f)
+                return;
+
+            plasmaTxDB = Physics.PlasmaAttenuationDB(bestFreqHz, severity);
+            plasmaRxNoiseK = Physics.PlasmaNoiseTemperature(bestFreqHz, severity);
+            plasmaRxDB = Physics.PlasmaAttenuationDB(bestFreqHz, severity);
+        }
+
+        /// <summary>
+        /// Common setup for plasma calculations: checks whether the node is in
+        /// plasma and finds the highest-frequency active antenna frequency.
+        /// Returns severity in [0,1] and the best antenna frequency in Hz.
+        /// Returns severity=0 if the node is not in plasma.
+        ///
+        /// For LOADED vessels: derives severity from vessel.externalTemperature via
+        /// Physics.PlasmaHeatSeverity — a smoothstep curve that is body-agnostic
+        /// (KSP computes externalTemperature from density and velocity at each body)
+        /// and naturally differentiates Eve, Duna, Jool, and planet-pack bodies.
+        /// The plasmaBlackout difficulty setting is respected: if disabled, returns 0.
+        ///
+        /// For UNLOADED vessels: falls back to the stock binary modifier via
+        /// Physics.PlasmaModifierToSeverity, preserving the original behaviour.
+        /// </summary>
+        private static float GetPlasmaSeverity(RACommNode node, out float bestFreqHz)
+        {
+            bestFreqHz = -1f;
+            if (node.isHome) return 0f;
+
+            // Respect the plasmaBlackout difficulty setting, same as RACommNode.CanComm().
+            if (!HighLogic.CurrentGame.Parameters.CustomParams<CommNetParams>().plasmaBlackout)
+                return 0f;
+
+            RACommNetVessel raCNV = node.ParentVessel?.Connection as RACommNetVessel;
+            if (raCNV == null) return 0f;
+
+            float severity;
+            Vessel vessel = node.ParentVessel;
+            if (vessel != null && vessel.loaded)
+            {
+                // Normalise externalTemperature against KSP's own plasma threshold.
+                // PhysicsGlobals.CommNetBlackoutThreshold is the same value KSP uses for
+                // the binary InPlasma check, so expressing severity as a ratio of it keeps
+                // our model tightly coupled to the underlying KSP plasma parameter.
+                // Only compute if actually in atmosphere to avoid overhead at altitude.
+                if (!vessel.atmDensity.Equals(0.0))
+                {
+                    float ratio = (float)(vessel.externalTemperature
+                                / PhysicsGlobals.CommNetBlackoutThreshold);
+                    severity = Physics.PlasmaHeatSeverity(ratio);
+                }
+                else
+                    return 0f;
+            }
+            else
+            {
+                // Unloaded vessel: externalTemperature is not available.
+                // No GetPlasmaModifier() exists on RACommNetVessel in this codebase,
+                // so skip plasma modelling for unloaded vessels in the min-diff implementation.
+                return 0f;
+            }
+
+            if (severity <= 0f) return 0f;
+
+            foreach (RealAntenna ra in node.RAAntennaList)
+                if (ra.RFBand != null && ra.RFBand.Frequency > bestFreqHz)
+                    bestFreqHz = ra.RFBand.Frequency;
+
+            return bestFreqHz > 0f ? severity : 0f;
         }
 
         // Gather all CelestialBodies and build Jobs structs
