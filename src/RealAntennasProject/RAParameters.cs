@@ -30,6 +30,9 @@
         [GameParameters.CustomFloatParameterUI("Rescale transmission rate for stock science", toolTip = "Multiplier to transmission rate for stock science.  Available for balancing purposes: turn it down if science transmits too quickly, or up if too slowly.", minValue = 0.00001f, maxValue = 0.01f, stepCount = 10000, displayFormat = "N5")]
         public float StockRateModifier = 0.01f;
 
+        [GameParameters.CustomParameterUI("Allow Antenna Tuning on EVA", toolTip = "Allow Engineers on EVA to adjust antenna transmit power and RF band. Engineers can also upgrade Antenna Tech Level using Repair Kits (Each Repair Kit allows up to 2 tech levels increase).")]
+        public bool allowEVAAntennaEdit = true;
+
         public override void SetDifficultyPreset(GameParameters.Preset preset)
         {
             switch (preset)
