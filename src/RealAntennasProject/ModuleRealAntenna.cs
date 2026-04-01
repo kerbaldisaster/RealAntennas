@@ -23,7 +23,7 @@ namespace RealAntennas
         private const string PAWGroupPlanner = "Antenna Planning";
 
         [KSPField(guiActiveEditor = true, guiName = "Antenna", groupName = PAWGroup, groupDisplayName = PAWGroup),
-         UI_Toggle(disabledText = "<color=red><b>Disabled</b></color>", enabledText = "<color=green>Enabled</color>", scene = UI_Scene.Editor)]
+        UI_Toggle(disabledText = "<color=red><b>Disabled</b></color>", enabledText = "<color=green>Enabled</color>", scene = UI_Scene.Editor)]
         public bool _enabled = true;
 
         [KSPField(guiActiveEditor = false, guiActive = true, guiName = "Condition", isPersistant = true, groupName = PAWGroup, groupDisplayName = PAWGroup)]
@@ -33,7 +33,7 @@ namespace RealAntennas
         public float Gain;          // Physical directionality, measured in dBi
 
         [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "Transmit Power (dBm)", guiUnits = " dBm", guiFormat = "F1", groupName = PAWGroup),
-         UI_FloatRange(maxValue = 60, minValue = 0, stepIncrement = 1, scene = UI_Scene.All)]
+        UI_FloatRange(maxValue = 60, minValue = 0, stepIncrement = 1, scene = UI_Scene.All)]
         public float TxPower = 30;       // Transmit Power in dBm (milliwatts)
 
         // Read-only display used when slider is hidden
@@ -43,7 +43,7 @@ namespace RealAntennas
         [KSPField] protected float MaxTxPower = 60;    // Per-part max setting for TxPower
 
         [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "Tech Level", guiFormat = "N0", groupName = PAWGroup),
-         UI_FloatRange(minValue = 0f, stepIncrement = 1f, scene = UI_Scene.Editor)]
+        UI_FloatRange(minValue = 0f, stepIncrement = 1f, scene = UI_Scene.Editor)]
         private float TechLevel = -1f;
 
         [KSPField(guiActive = false, guiActiveEditor = false, guiName = "Tech Level", groupName = PAWGroup, groupDisplayName = PAWGroup)]
@@ -91,6 +91,7 @@ namespace RealAntennas
         private ModuleDeployableAntenna deployableAntenna;
         public bool Deployable => deployableAntenna != null;
         public bool Deployed => deployableAntenna?.deployState == ModuleDeployablePart.DeployState.EXTENDED;
+        public float ElectronicsMass(TechLevelInfo techLevel, float txPower) => (techLevel.BaseMass + techLevel.MassPerWatt * txPower) / 1000;
 
         private float StockRateModifier = 0.001f;
         public static float InactivePowerConsumptionMult = 0.1f;
@@ -311,7 +312,7 @@ namespace RealAntennas
             { if (Events[nameof(StartTransmission)] is BaseEvent be) be.active = false; }
             { if (Events[nameof(StopTransmission)] is BaseEvent be) be.active = false; }
             if (Actions[nameof(StartTransmissionAction)] is BaseAction ba) ba.active = false;
-            if (Fields[nameof(powerText)] is BaseField bf) bf.guiActive = bf.guiActiveEditor = false;
+            if (Fields[nameof(powerText)] is BaseField bf) bf.guiActive = bf.guiActiveEditor = false;      // "Antenna Rating"
         }
 
         private void SetFieldVisibility()
@@ -338,8 +339,7 @@ namespace RealAntennas
             Fields[nameof(sActivePowerConsumed)].guiActiveEditor = Fields[nameof(sActivePowerConsumed)].guiActive = showFields;
             Fields[nameof(sIdlePowerConsumed)].guiActiveEditor = Fields[nameof(sIdlePowerConsumed)].guiActive = showFields;
             Fields[nameof(sAntennaTarget)].guiActive = showFields;
-            Fields[nameof(plannerActiveTxTime)].guiActiveEditor =
-                Kerbalism.Kerbalism.KerbalismAssembly is System.Reflection.Assembly;
+            Fields[nameof(plannerActiveTxTime)].guiActiveEditor = Kerbalism.Kerbalism.KerbalismAssembly is System.Reflection.Assembly;
             Actions[nameof(PermanentShutdownAction)].active = showFields;
             Events[nameof(PermanentShutdownEvent)].guiActive = showFields;
             Events[nameof(PermanentShutdownEvent)].active = showFields;
@@ -448,7 +448,6 @@ namespace RealAntennas
             MarkUIRefresh();
             RefreshPAWIfDirty();
         }
-
         private void OnRFBandChange(BaseField f, object obj) => RecalculateFields();
         private void OnTxPowerChange(BaseField f, object obj) => RecalculateFields();
         private void OnTechLevelChange(BaseField f, object obj)     // obj is the OLD value
@@ -478,15 +477,12 @@ namespace RealAntennas
         {
             _enabled = false;
             Condition = AntennaCondition.PermanentShutdown;
-
             SetupIdlePower();
             GameEvents.onVesselWasModified.Fire(vessel);    // Need to notify RACommNetVessel about disabling antennas
             if (vessel.connection is RACommNetVessel RACNV)
-            {
                 RACNV.DiscoverAntennas();
-                MarkUIRefresh();
-                RefreshPAWIfDirty();
-            }
+            MarkUIRefresh();
+            RefreshPAWIfDirty();
         }
 
         private void ApplyGameSettings()
@@ -548,6 +544,7 @@ namespace RealAntennas
                     RFBand = opFlight.options[opFlight.options.Length - 1];
             }
         }
+
         public override string GetModuleDisplayName() => "RealAntenna";
         public override string GetInfo()
         {
@@ -569,6 +566,13 @@ namespace RealAntennas
 
         public override bool CanComm() => Condition == AntennaCondition.Enabled && (!Deployable || Deployed) && base.CanComm();
 
+        public override string ToString() => RAAntenna.ToString();
+
+        #region Stock Science Transmission
+        // StartTransmission -> CanTransmit()
+        //                  -> OnStartTransmission() -> queueVesselData(), transmitQueuedData()
+        // (Science) -> TransmitData() -> TransmitQueuedData()
+
         public override bool CanTransmit()
         {
             if (Condition != AntennaCondition.Enabled) return false;
@@ -577,9 +581,6 @@ namespace RealAntennas
             return base.CanTransmit();
         }
 
-        public override string ToString() => RAAntenna.ToString();
-
-        #region Stock Science Transmission
         internal void SetTransmissionParams()
         {
             if (RACommNetScenario.CommNetEnabled && this?.vessel?.Connection?.Comm is RACommNode node)

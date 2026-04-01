@@ -398,3 +398,6 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+/GameData/RealAntennas/color.png
+/GameData/RealAntennas/pencil.png
+/GameData/RealAntennas/trash.png
