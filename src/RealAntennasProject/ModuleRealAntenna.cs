@@ -23,7 +23,7 @@ namespace RealAntennas
         private const string PAWGroupPlanner = "Antenna Planning";
 
         [KSPField(guiActiveEditor = true, guiName = "Antenna", groupName = PAWGroup, groupDisplayName = PAWGroup),
-        UI_Toggle(disabledText = "<color=red><b>Disabled</b></color>", enabledText = "<color=green>Enabled</color>", scene = UI_Scene.Editor)]
+         UI_Toggle(disabledText = "<color=red><b>Disabled</b></color>", enabledText = "<color=green>Enabled</color>", scene = UI_Scene.Editor)]
         public bool _enabled = true;
 
         [KSPField(guiActiveEditor = false, guiActive = true, guiName = "Condition", isPersistant = true, groupName = PAWGroup, groupDisplayName = PAWGroup)]
@@ -33,13 +33,13 @@ namespace RealAntennas
         public float Gain;          // Physical directionality, measured in dBi
 
         [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "Transmit Power (dBm)", guiUnits = " dBm", guiFormat = "F1", groupName = PAWGroup),
-        UI_FloatRange(maxValue = 60, minValue = 0, stepIncrement = 1, scene = UI_Scene.Editor)]
+         UI_FloatRange(maxValue = 60, minValue = 0, stepIncrement = 1, scene = UI_Scene.Editor)]
         public float TxPower = 30;       // Transmit Power in dBm (milliwatts)
 
         [KSPField] protected float MaxTxPower = 60;    // Per-part max setting for TxPower
 
         [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "Tech Level", guiFormat = "N0", groupName = PAWGroup),
-        UI_FloatRange(minValue = 0f, stepIncrement = 1f, scene = UI_Scene.Editor)]
+         UI_FloatRange(minValue = 0f, stepIncrement = 1f, scene = UI_Scene.Editor)]
         private float TechLevel = -1f;
         private int techLevel => Convert.ToInt32(TechLevel);
 
@@ -79,6 +79,9 @@ namespace RealAntennas
         private ModuleDeployableAntenna deployableAntenna;
         public bool Deployable => deployableAntenna != null;
         public bool Deployed => deployableAntenna?.deployState == ModuleDeployablePart.DeployState.EXTENDED;
+
+        private ModuleDeployablePart.DeployState _lastDeployState = ModuleDeployablePart.DeployState.EXTENDED;
+
         public float ElectronicsMass(TechLevelInfo techLevel, float txPower) => (techLevel.BaseMass + techLevel.MassPerWatt * txPower) / 1000;
 
         private float StockRateModifier = 0.001f;
@@ -108,6 +111,96 @@ namespace RealAntennas
         {
             var dbg = new GameObject($"Antenna Debugger: {part.partInfo.title}").AddComponent<Network.ConnectionDebugger>();
             dbg.antenna = RAAntenna;
+        }
+
+        [KSPEvent(active = true, guiActive = true, guiActiveEditor = false, guiName = "Disable Antenna", groupName = PAWGroup, groupDisplayName = PAWGroup)]
+        public void FlightToggleAntennaEvent()
+        {
+            if (Deployable) return;
+            if (Condition == AntennaCondition.PermanentShutdown || Condition == AntennaCondition.Broken) return;
+
+            ApplyEnableDisableFromAction(!_enabled);
+        }
+
+        private void UpdateFlightToggleGUI()
+        {
+            if (Events == null) return;
+            if (!Events.Contains(nameof(FlightToggleAntennaEvent))) return;
+
+            bool show = HighLogic.LoadedSceneIsFlight
+                        && Condition != AntennaCondition.PermanentShutdown
+                        && Condition != AntennaCondition.Broken
+                        && !Deployable;
+
+            if (show)
+            {
+                Events[nameof(FlightToggleAntennaEvent)].guiName =
+                    (Condition == AntennaCondition.Enabled) ? "Disable Antenna" : "Enable Antenna";
+            }
+
+            Events[nameof(FlightToggleAntennaEvent)].active = show;
+            Events[nameof(FlightToggleAntennaEvent)].guiActive = show;
+        }
+
+        [KSPAction("Enable Antenna")]
+        public void EnableAntennaAction(KSPActionParam _)
+        {
+            ApplyEnableDisableFromAction(true);
+        }
+
+        [KSPAction("Disable Antenna")]
+        public void DisableAntennaAction(KSPActionParam _)
+        {
+            ApplyEnableDisableFromAction(false);
+        }
+
+        [KSPAction("Toggle Antenna")]
+        public void ToggleAntennaAction(KSPActionParam _)
+        {
+            ApplyEnableDisableFromAction(!_enabled);
+        }
+
+        private void ApplyEnableDisableFromAction(bool enabled)
+        {
+            if (Deployable) return;
+            if (Condition == AntennaCondition.PermanentShutdown || Condition == AntennaCondition.Broken) return;
+
+            _enabled = enabled;
+            Condition = enabled ? AntennaCondition.Enabled : AntennaCondition.Disabled;
+            isEnabled = enabled;
+
+            GameEvents.OnGameSettingsApplied.Remove(ApplyGameSettings);
+            if (enabled)
+                GameEvents.OnGameSettingsApplied.Add(ApplyGameSettings);
+
+            SetupIdlePower();
+            RecalculatePlannerECConsumption();
+
+            if (HighLogic.LoadedSceneIsFlight)
+            {
+                GameEvents.onVesselWasModified.Fire(vessel);
+                if (vessel?.connection is RACommNetVessel racnv)
+                    racnv.DiscoverAntennas();
+            }
+
+            SetFieldVisibility();
+        }
+
+        private void OnDeployStateChanged(ModuleDeployablePart.DeployState state)
+        {
+            bool isActive = (state == ModuleDeployablePart.DeployState.EXTENDED);
+            AntennaCondition newCondition = isActive ? AntennaCondition.Enabled : AntennaCondition.Disabled;
+            if (Condition == newCondition) return;
+
+            Condition = newCondition;
+            _enabled = isActive;
+            isEnabled = isActive;
+
+            SetupIdlePower();
+            SetFieldVisibility();
+
+            if (vessel?.connection is RACommNetVessel racnv)
+                racnv.DiscoverAntennas();
         }
 
         public override void OnAwake()
@@ -175,6 +268,8 @@ namespace RealAntennas
             }
 
             deployableAntenna = part.FindModuleImplementingFast<ModuleDeployableAntenna>();
+            if (Deployable)
+                _lastDeployState = deployableAntenna.deployState;
 
             ApplyGameSettings();
             SetupUICallbacks();
@@ -198,18 +293,23 @@ namespace RealAntennas
 
         private void SetupIdlePower()
         {
-            if (HighLogic.LoadedSceneIsFlight && Condition != AntennaCondition.Disabled)
-            {
-                var electricCharge = resHandler.inputResources.First(x => x.id == PartResourceLibrary.ElectricityHashcode);
-                electricCharge.rate = Condition != AntennaCondition.PermanentShutdown && (Kerbalism.Kerbalism.KerbalismAssembly is null) ? RAAntenna.IdlePowerDraw : 0;
-                string err = "";
-                resHandler.UpdateModuleResourceInputs(ref err, 1, 1, false, false);
-            }
+            if (!HighLogic.LoadedSceneIsFlight) return;
+
+            var electricCharge = resHandler.inputResources.First(x => x.id == PartResourceLibrary.ElectricityHashcode);
+            bool consumesIdle =
+                Condition != AntennaCondition.Disabled &&
+                Condition != AntennaCondition.PermanentShutdown &&
+                (!Deployable || Deployed) &&
+                (Kerbalism.Kerbalism.KerbalismAssembly is null);
+            electricCharge.rate = consumesIdle ? RAAntenna.IdlePowerDraw : 0;
+            string err = "";
+            resHandler.UpdateModuleResourceInputs(ref err, 1, 1, false, false);
+
         }
 
         public void FixedUpdate()
         {
-            if (HighLogic.LoadedSceneIsFlight && Condition != AntennaCondition.Disabled && Condition != AntennaCondition.PermanentShutdown)
+            if (HighLogic.LoadedSceneIsFlight && Condition != AntennaCondition.Disabled && Condition != AntennaCondition.PermanentShutdown && (!Deployable || Deployed))
             {
                 RAAntenna.AMWTemp = (AMWTemp > 0) ? AMWTemp : Convert.ToSingle(part.temperature);
                 //part.AddThermalFlux(req / Time.fixedDeltaTime);
@@ -217,6 +317,15 @@ namespace RealAntennas
                 {
                     string err = "";
                     resHandler.UpdateModuleResourceInputs(ref err, 1, 1, true, false);
+                }
+            }
+            if (Deployable)
+            {
+                var currentState = deployableAntenna.deployState;
+                if (currentState != _lastDeployState)
+                {
+                    _lastDeployState = currentState;
+                    OnDeployStateChanged(currentState);
                 }
             }
         }
@@ -266,6 +375,16 @@ namespace RealAntennas
             Events[nameof(AntennaPlanningGUI)].guiActive = showFields;
             Events[nameof(DebugAntenna)].active = showFields;
             Events[nameof(DebugAntenna)].guiActive = showFields;
+
+            if (Actions != null)
+            {
+                bool allowAG = !Deployable;
+                if (Actions[nameof(EnableAntennaAction)] is BaseAction a1) a1.active = allowAG;
+                if (Actions[nameof(DisableAntennaAction)] is BaseAction a2) a2.active = allowAG;
+                if (Actions[nameof(ToggleAntennaAction)] is BaseAction a3) a3.active = allowAG;
+            }
+
+            UpdateFlightToggleGUI();
         }
 
         private void SetupUICallbacks()
