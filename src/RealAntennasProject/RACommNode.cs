@@ -19,7 +19,8 @@ namespace RealAntennas
             RAAntennaList = new List<RealAntenna>();
         }
         public RACommNode(CommNet.CommNode cn) : this(cn.transform) { }
-
+        public bool canRelay = true;
+        public bool CanRelay => isHome || canRelay;
 
         public Vector3d GetSurfaceNormalVector()
         {

@@ -62,6 +62,43 @@ namespace RealAntennas
             ConvertDistance(distanceMin, out double tMin, out dMinMultIndex);
             dMin = $"{tMin:F3}";
             dMax = $"{tMax:F3}";
+
+            // Resolve fixedAntenna from best-matching ground station if not already set.
+            // This handles the PAW launch path where only primaryAntenna is assigned.
+            if (fixedAntenna == null && primaryAntenna != null)
+            {
+                var homes = RACommNetScenario.GroundStations?.Values
+                    .Where(x => x != null && x.Comm is RACommNode)
+                    ?? Enumerable.Empty<Network.RACommNetHome>();
+                fixedAntenna = GetBestMatchingGroundStation(primaryAntenna, homes) ?? primaryAntenna;
+            }
+
+            // Back-link so RecalculateFields() can notify this planner when antenna
+            // parameters change in the editor or flight PAW.
+            if (parentPartModule != null)
+                parentPartModule.plannerGUI = this;
+            RequestUpdate = true;
+        }
+
+        private void RefreshAndSelectDefaultAntenna()
+        {
+            protoVesselAntennaCache.Clear();
+            DiscoverProtoVesselAntennas(protoVesselAntennaCache);
+
+            // Pick a reasonable default antenna if none is selected
+            if (primaryAntenna == null)
+            {
+                foreach (var kvp in protoVesselAntennaCache)
+                {
+                    var list = kvp.Value;
+                    if (list != null && list.Count > 0)
+                    {
+                        primaryAntenna = list[0];
+                        break;
+                    }
+                }
+            }
+
             RequestUpdate = true;
         }
 
@@ -70,7 +107,8 @@ namespace RealAntennas
             fixedGO.DestroyGameObject();
             primaryNearGO.DestroyGameObject();
             primaryFarGO.DestroyGameObject();
-            parentPartModule.plannerGUI = null;
+            if (parentPartModule)
+                parentPartModule.plannerGUI = null;
             GameEvents.onEditorPodDeleted.Remove(OnEditorRestart);
             GameEvents.onEditorRestart.Remove(OnEditorRestart);
         }
@@ -85,6 +123,27 @@ namespace RealAntennas
 
         void GUIDisplay(int windowID)
         {
+            // Guard: planner requires a primary antenna context
+            if (primaryAntenna == null)
+            {
+                GUILayout.Label("Select an antenna to begin planning.", HighLogic.Skin.label);
+                if (GUILayout.Button("Refresh Antenna List"))
+                    RefreshAndSelectDefaultAntenna();
+                GUI.DragWindow();
+                return;
+            }
+
+            // Guard: fixedAntenna should have been resolved in Start(), but protect
+            // against it becoming null later (e.g. vessel unloads mid-session).
+            if (fixedAntenna == null)
+            {
+                var homes = RACommNetScenario.GroundStations?.Values
+                    .Where(x => x != null && x.Comm is RACommNode)
+                    ?? Enumerable.Empty<Network.RACommNetHome>();
+                fixedAntenna = GetBestMatchingGroundStation(primaryAntenna, homes) ?? primaryAntenna;
+                RequestUpdate = true;
+            }
+
             if (HighLogic.LoadedSceneIsEditor)
             {
                 GUILayout.BeginHorizontal();

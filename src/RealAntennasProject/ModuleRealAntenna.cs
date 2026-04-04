@@ -54,6 +54,15 @@ namespace RealAntennas
          UI_ChooseOption(scene = UI_Scene.Editor)]
         public string RFBand = "S";
 
+        [KSPField(isPersistant = true)]
+        public uint SubnetMask = RASubnets.PublicBit; // public-only default
+
+        // SubnetSummary is the human-readable display in the PAW.
+        // It is set to NamedMaskSummary() whenever the mask changes, and refreshed
+        // in OnStart() once the scenario (and its name registry) is guaranteed available.
+        [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Subnets", groupName = PAWGroup)]
+        public string SubnetSummary = "Public";
+
         public Antenna.BandInfo RFBandInfo => Antenna.BandInfo.All[RFBand];
 
         [KSPField(guiActive = true, guiActiveEditor = true, guiName = "Power (Active)", groupName = PAWGroup)]
@@ -96,11 +105,44 @@ namespace RealAntennas
         [KSPEvent(active = true, guiActive = true, guiActiveEditor = true, guiName = "Antenna Planning", groupName = PAWGroup)]
         public void AntennaPlanningGUI()
         {
-            plannerGUI = new GameObject($"{RAAntenna.Name}-Planning").AddComponent<PlannerGUI>();
-            plannerGUI.primaryAntenna = RAAntenna;
-            var homes = RACommNetScenario.GroundStations.Values.Where(x => x.Comm is RACommNode);
-            plannerGUI.fixedAntenna = plannerGUI.GetBestMatchingGroundStation(RAAntenna, homes) is RealAntenna bestDSNAntenna ? bestDSNAntenna : RAAntenna;
-            plannerGUI.parentPartModule = this;
+            if (RAAntenna == null)
+                return;
+
+            PlannerGUI gui = UnityEngine.Object.FindObjectOfType<PlannerGUI>();
+            if (gui == null)
+            {
+                GameObject go = new GameObject("RA.PlannerGUI");
+                gui = go.AddComponent<PlannerGUI>();
+                gui.parentPartModule = this;
+                gui.primaryAntenna = RAAntenna;
+                // fixedAntenna and plannerGUI back-reference are set in PlannerGUI.Start()
+            }
+            else
+            {
+                // Planner already open (possibly for a different antenna) — update context
+                // and re-snap to this PAW.
+                gui.parentPartModule = this;
+                gui.primaryAntenna = RAAntenna;
+                gui.RequestUpdate = true;
+            }
+        }
+
+        [KSPEvent(active = true, guiActive = true, guiActiveEditor = true, guiName = "Edit Subnets", groupName = PAWGroup)]
+        public void EditSubnets()
+        {
+            RASubnets.SubnetEditorGUI gui = UnityEngine.Object.FindObjectOfType<RASubnets.SubnetEditorGUI>();
+            if (gui == null)
+            {
+                GameObject go = new GameObject($"{RAAntenna?.Name}-SubnetEditor");
+                gui = go.AddComponent<RASubnets.SubnetEditorGUI>();
+                gui.Init(this, RAAntenna);
+            }
+            else
+            {
+                // Planner already open (possibly for a different antenna) — update context
+                // and re-snap to this PAW.
+                gui.Init(this,RAAntenna);
+            }
         }
 
         [KSPEvent(active = true, guiActive = true, name = "Debug Antenna", groupName = PAWGroup)]
@@ -141,6 +183,12 @@ namespace RealAntennas
             RAAntenna.Name = part.partInfo?.title ?? part.name;
             RAAntenna.Parent = this;
             RAAntenna.LoadFromConfigNode(node);
+            SubnetMask = RAAntenna.SubnetMask;
+            // Use NamedMaskSummary if the scenario registry is already available,
+            // otherwise fall back to the compact form; OnStart() will refresh it.
+            SubnetSummary = SubnetManagerScenario.Instance != null
+                ? RASubnets.NamedMaskSummary(SubnetMask)
+                : RASubnets.MaskSummary(SubnetMask);
             Gain = RAAntenna.Gain;
         }
 
@@ -183,6 +231,10 @@ namespace RealAntennas
             RecalculateFields();
             SetFieldVisibility();
             ApplyTLColoring();
+
+            // Scenario is guaranteed available by OnStart — refresh the named summary now
+            // in case Configure() ran before the registry was loaded.
+            SubnetSummary = RASubnets.NamedMaskSummary(RAAntenna.SubnetMask);
 
             if (HighLogic.LoadedSceneIsFlight)
             {
@@ -228,6 +280,8 @@ namespace RealAntennas
             RAAntenna.RFBand = Antenna.BandInfo.All[RFBand];
             RAAntenna.SymbolRate = RAAntenna.RFBand.MaxSymbolRate(techLevel);
             RAAntenna.Gain = Gain = (antennaDiameter > 0) ? Physics.GainFromDishDiamater(antennaDiameter, RFBandInfo.Frequency, RAAntenna.AntennaEfficiency) : Physics.GainFromReference(referenceGain, referenceFrequency * 1e6f, RFBandInfo.Frequency);
+            RAAntenna.SubnetMask = RASubnets.NormalizeMask(SubnetMask);
+            SubnetSummary = RASubnets.NamedMaskSummary(RAAntenna.SubnetMask);
             double idleDraw = RAAntenna.IdlePowerDraw * 1000;
             sIdlePowerConsumed = $"{idleDraw:F2} Watts";
             sActivePowerConsumed = $"{idleDraw + (PowerDrawLinear / 1000):F2} Watts";
@@ -389,7 +443,8 @@ namespace RealAntennas
                     float tGain = (antennaDiameter > 0) ? Physics.GainFromDishDiamater(antennaDiameter, band.Frequency, RAAntenna.AntennaEfficiency) : Physics.GainFromReference(referenceGain, referenceFrequency * 1e6f, band.Frequency);
                     res += $"<color=green><b>{band.name}</b></color>: {tGain:F1} dBi, {Physics.Beamwidth(tGain):F1} beamwidth\n";
                 }
-            } else
+            }
+            else
             {
                 res = $"<color=green>Omni-directional</color>: {Gain:F1} dBi";
             }
@@ -446,20 +501,46 @@ namespace RealAntennas
             scienceMonitorActive = true;
             while (busy || transmissionQueue.Count > 0)
             {
+
                 if (commStream is RnDCommsStream)
                 {
-                    float dataIn = (float)commStream.GetType().GetField("dataIn", flag).GetValue(commStream);
-                    //Debug.Log($"{ModTag} StockScienceFixer: Current: {dataIn} / {commStream.fileSize}, delivered: {packetSize}");
-                    if (dataIn == commStream.fileSize)
+                    float dataIn = 0f;
+                    bool gotDataIn = false;
+
+                    try
                     {
-                        Debug.Log($"{ModTag} Stock Science Transfer delivered {dataIn} Mits successfully");
-                        yield return new WaitForSeconds(packetInterval * 2);
+                        var f = commStream.GetType().GetField("dataIn", flag);
+                        if (f != null)
+                        {
+                            object boxed = f.GetValue(commStream);
+                            if (boxed != null)
+                            {
+                                // Handles float/double/int/etc safely (prevents InvalidCastException spam)
+                                dataIn = Convert.ToSingle(boxed);
+                                gotDataIn = true;
+                            }
+                        }
                     }
-                    else if (dataIn / commStream.fileSize >= threshold)
+                    catch
                     {
-                        Debug.Log($"{ModTag} StockScienceFixer stuffing the last segment of data...");
-                        commStream.StreamData(commStream.fileSize * 0.1f, vessel.protoVessel);
-                        yield return new WaitForSeconds(packetInterval * 2);
+                        // Reflection/type mismatch across KSP versions: just skip the RnD-specific check
+                        gotDataIn = false;
+                    }
+
+                    if (gotDataIn)
+                    {
+                        //Debug.Log($"{ModTag} StockScienceFixer: Current: {dataIn} / {commStream.fileSize}, delivered: {packetSize}");
+                        if (dataIn == commStream.fileSize)
+                        {
+                            Debug.Log($"{ModTag} Stock Science Transfer delivered {dataIn} Mits successfully");
+                            yield return new WaitForSeconds(packetInterval * 2);
+                        }
+                        else if (dataIn / commStream.fileSize >= threshold)
+                        {
+                            Debug.Log($"{ModTag} StockScienceFixer stuffing the last segment of data...");
+                            commStream.StreamData(commStream.fileSize * 0.1f, vessel.protoVessel);
+                            yield return new WaitForSeconds(packetInterval * 2);
+                        }
                     }
                 }
                 yield return new WaitForSeconds(packetInterval);
@@ -472,7 +553,7 @@ namespace RealAntennas
 
         #region Cost and Mass Modifiers
         public float GetModuleCost(float defaultCost, ModifierStagingSituation sit) =>
-            Condition != AntennaCondition.Disabled ? RAAntenna.TechLevelInfo.BaseCost + (RAAntenna.TechLevelInfo.CostPerWatt * RATools.LinearScale(TxPower)/1000) : 0;
+            Condition != AntennaCondition.Disabled ? RAAntenna.TechLevelInfo.BaseCost + (RAAntenna.TechLevelInfo.CostPerWatt * RATools.LinearScale(TxPower) / 1000) : 0;
         public float GetModuleMass(float defaultMass, ModifierStagingSituation sit) =>
             Condition != AntennaCondition.Disabled && applyMassModifier ? (RAAntenna.TechLevelInfo.BaseMass + (RAAntenna.TechLevelInfo.MassPerWatt * RATools.LinearScale(TxPower) / 1000)) / 1000 : 0;
         public ModifierChangeWhen GetModuleCostChangeWhen() => ModifierChangeWhen.FIXED;

@@ -51,22 +51,24 @@ namespace RealAntennas
         }
 
         internal void MakeLink(RealAntenna fwdTx,
-                               RealAntenna fwdRx,
-                               RealAntenna revTx,
-                               RealAntenna revRx,
-                               RACommNode a,
-                               RACommNode b,
-                               double distance,
-                               double FwdDataRate,
-                               double RevDataRate,
-                               double FwdBestDataRate,
-                               double FwdMetric,
-                               double RevMetric
-                               )
+            RealAntenna fwdRx,
+            RealAntenna revTx,
+            RealAntenna revRx,
+            RACommNode a,
+            RACommNode b,
+            double distance,
+            double FwdDataRate,
+            double RevDataRate,
+            double FwdBestDataRate,
+            double FwdMetric,
+            double RevMetric
+        )
         {
             RACommLink link = Connect(a, b, distance) as RACommLink;
-            link.aCanRelay = true;
-            link.bCanRelay = true;      // All antennas can relay.
+
+            // relay capability determined by node (BG deployed science endpoints cannot relay)
+            link.aCanRelay = (a as RACommNode)?.CanRelay ?? true;
+            link.bCanRelay = (b as RACommNode)?.CanRelay ?? true;
             link.bothRelay = link.aCanRelay && link.bCanRelay;
 
             link.FwdAntennaTx = fwdTx;
@@ -75,6 +77,9 @@ namespace RealAntennas
             link.RevAntennaRx = revRx;
             link.FwdDataRate = FwdDataRate;
             link.RevDataRate = RevDataRate;
+            int f = RASubnets.PickLinkSubnet(fwdTx?.SubnetMask ?? RASubnets.PublicBit, fwdRx?.SubnetMask ?? RASubnets.PublicBit);
+            int r = RASubnets.PickLinkSubnet(revTx?.SubnetMask ?? RASubnets.PublicBit, revRx?.SubnetMask ?? RASubnets.PublicBit);
+            link.LinkSubnet = (f != RASubnets.PublicSubnet) ? f : r;
             link.cost = link.CostFunc((FwdDataRate + RevDataRate) / 2);
             link.FwdMetric = FwdMetric;
             link.RevMetric = RevMetric;
@@ -310,10 +315,15 @@ namespace RealAntennas
                     foreach (KeyValuePair<CommNode, CommLink> kvp in candidate)
                     {
                         if (kvp.Key is RACommNode node && kvp.Value is RACommLink link && !sptSet.Contains(node)
-                            && (link.start == candidate ? link.FwdAntennaRx : link.RevAntennaRx) is RealAntenna rxAntenna
-                            // Skip if the peer is unable to relay and is also not the destination
-                            && (rxAntenna.TechLevelInfo.Level >= RACommNetScenario.minRelayTL || where(start, node)))
+                            && (link.start == candidate ? link.FwdAntennaRx : link.RevAntennaRx) is RealAntenna rxAntenna)
                         {
+                            bool isDest = where(start, node);
+                            // BG deployed science controllers (and any node with CanRelay==false) cannot be intermediate hops
+                            if (!isDest && !(node.CanRelay))
+                                continue;
+                            // // Skip if the peer is unable to relay and is also not the destination
+                            if (!isDest && rxAntenna.TechLevelInfo.Level < RACommNetScenario.minRelayTL)
+                                continue;
                             double cost = link.start == candidate ? link.FwdCost : link.RevCost;
                             if (node.bestCost > candidate.bestCost + cost)
                             {

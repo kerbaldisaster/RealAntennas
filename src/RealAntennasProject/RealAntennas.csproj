@@ -49,6 +49,8 @@
     <Compile Include="MapUI\Settings.cs" />
     <Compile Include="Network\ConnectionDebugger.cs" />
     <Compile Include="Network\LinkDetails.cs" />
+    <Compile Include="Subnets\RASubnets.cs" />
+    <Compile Include="Subnets\SubnetManagerUI.cs" />
     <Compile Include="Targeting\AntennaTargetGUI.cs" />
     <Compile Include="Antenna\BandInfo.cs" />
     <Compile Include="Antenna\Encoder.cs" />

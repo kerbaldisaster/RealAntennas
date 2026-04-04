@@ -117,7 +117,8 @@ namespace RealAntennas.Network
             int tsLevel = RACommNetScenario.GroundStationTechLevel;
             // Config node contains a list of antennas to build.
             t.RAAntennaList = new List<RealAntenna> { };
-            foreach (ConfigNode antNode in config.GetNodes("Antenna")) 
+            int runtimeAntennaIndex = 0;
+            foreach (ConfigNode antNode in config.GetNodes("Antenna"))
             {
                 //Debug.LogFormat("Building an antenna for {0}", antNode);
                 int targetLevel = Int32.Parse(antNode.GetValue("TechLevel"));
@@ -127,7 +128,13 @@ namespace RealAntennas.Network
                     ant.LoadFromConfigNode(antNode);
                     ant.ProcessUpgrades(tsLevel, antNode);
                     ant.TechLevelInfo = TechLevelInfo.GetTechLevel(tsLevel);
+                    if (RealAntennas.SubnetManagerScenario.Instance != null &&
+                        RealAntennas.SubnetManagerScenario.Instance.TryGetGroundStationAntennaOverride(nodeName, runtimeAntennaIndex, out uint overrideMask))
+                    {
+                        ant.SubnetMask = overrideMask;
+                    }
                     t.RAAntennaList.Add(ant);
+                    runtimeAntennaIndex++;
                 }
             }
         }

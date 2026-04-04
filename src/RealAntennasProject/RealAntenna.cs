@@ -28,10 +28,10 @@ namespace RealAntennas
         public virtual float AMWTemp { get; set; }
         public virtual float Beamwidth => Physics.Beamwidth(Gain);
         public virtual string EncoderOverride { get; set; }
-
         public Antenna.Encoder Encoder => Antenna.Encoder.GetFromName(EncoderOverride) ?? Antenna.Encoder.GetFromTechLevel(TechLevelInfo.Level);
         public virtual float RequiredCI => Encoder.RequiredEbN0;
-
+        // subnet membership mask (0..31). Public behavior is enforced by RASubnets.NormalizeMask.
+        public uint SubnetMask { get; set; } = RASubnets.PublicBit;
         public ModuleRealAntenna Parent { get; internal set; }
         public ProtoPartModuleSnapshot ParentSnapshot { get; internal set; } = null;
         public CommNet.CommNode ParentNode { get; set; }
@@ -56,7 +56,8 @@ namespace RealAntennas
                 if (ParentSnapshot is ProtoPartModuleSnapshot snap)
                 {
                     snap.moduleValues.RemoveNode(Targeting.AntennaTarget.nodeName);
-                    _target.Save(snap.moduleValues);
+                    if (_target != null)
+                        _target.Save(snap.moduleValues);
                 }
             }
         }
@@ -80,6 +81,7 @@ namespace RealAntennas
             DataRate = dataRate;
             TechLevelInfo = TechLevelInfo.GetTechLevel(0);
             RFBand ??= Antenna.BandInfo.Get(Antenna.BandInfo.All.Keys.FirstOrDefault() ?? Antenna.BandInfo.DefaultBand);
+            SubnetMask = RASubnets.PublicBit;
         }
         public RealAntenna(RealAntenna orig)
         {
@@ -98,9 +100,15 @@ namespace RealAntennas
             ParentNode = orig.ParentNode;
             ParentSnapshot = orig.ParentSnapshot;
             EncoderOverride = orig.EncoderOverride;
+            SubnetMask = orig.SubnetMask;
         }
 
-        public virtual bool Compatible(RealAntenna other) => RFBand == other.RFBand;
+        // Compatibility is band + constellation subnet match (link-to-link only)
+        public virtual bool Compatible(RealAntenna other) =>
+            other is RealAntenna &&
+            RFBand == other.RFBand &&
+            RASubnets.SubnetMatch(this.SubnetMask, other.SubnetMask);
+
         public virtual bool DirectionCheck(RealAntenna other) => DirectionCheck(other.Position);
         public virtual bool DirectionCheck(Vector3 pos) => Physics.PointingLoss(this, pos) < Physics.MaxPointingLoss;
 
@@ -117,6 +125,19 @@ namespace RealAntennas
             TxPower = (config.HasValue("TxPower")) ? float.Parse(config.GetValue("TxPower")) : 30f;
             SymbolRate = RFBand.MaxSymbolRate(TechLevelInfo.Level);
             AMWTemp = (config.HasValue("AMWTemp")) ? float.Parse(config.GetValue("AMWTemp")) : 290f;
+
+            // SubnetMask (optional; if absent => Public)
+            uint sm = 0u;
+            if (config.HasValue("SubnetMask"))
+            {
+                string s = config.GetValue("SubnetMask").Trim();
+                if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                    uint.TryParse(s.Substring(2), System.Globalization.NumberStyles.HexNumber, null, out sm);
+                else
+                    uint.TryParse(s, out sm);
+            }
+            SubnetMask = RASubnets.NormalizeMask(sm);
+
             if (config.HasNode("TARGET"))
                 Target = Targeting.AntennaTarget.LoadFromConfig(config.GetNode("TARGET"), this);
             else if (Shape != AntennaShape.Omni && (ParentNode == null || !ParentNode.isHome) && !(Target?.Validate() == true) && HighLogic.LoadedSceneHasPlanetarium)
@@ -151,6 +172,16 @@ namespace RealAntennas
             if (config.TryGetValue("AMWTemp", ref f)) AMWTemp = f;
             if (config.TryGetValue("RFBand", ref s)) RFBand = Antenna.BandInfo.All[s];
             if (config.TryGetValue("EncoderOverride", ref s)) EncoderOverride = s;
+            if (config.HasValue("SubnetMask"))
+            {
+                uint sm = 0u;
+                string ss = config.GetValue("SubnetMask").Trim();
+                if (ss.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                    uint.TryParse(ss.Substring(2), System.Globalization.NumberStyles.HexNumber, null, out sm);
+                else
+                    uint.TryParse(ss, out sm);
+                SubnetMask = RASubnets.NormalizeMask(sm);
+            }
         }
 
         public virtual ConfigNode SetDefaultTarget()

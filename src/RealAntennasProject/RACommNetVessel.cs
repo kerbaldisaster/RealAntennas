@@ -68,6 +68,11 @@ namespace RealAntennas
                     OnLinkCreateSignalModifier = new Func<CommNet.CommNode, double>(GetSignalStrengthModifier),
                     ParentVessel = Vessel,
                 };
+                if (comm is RACommNode rn)
+                {
+                    // Deployed science controllers should never relay
+                    rn.canRelay = (GetDeployedScienceCluster(Vessel) == null);
+                }
                 (comm as RACommNode).RAAntennaList = DiscoverAntennas();
                 DiscoverProbeControlPoints();
                 vessel.connection = this;

@@ -15,6 +15,7 @@ namespace RealAntennas
         public double RevCost { get => CostFunc(RevDataRate); }
         public double FwdMetric { get; set; }
         public double RevMetric { get; set; }
+        public int LinkSubnet { get; set; } = RASubnets.PublicSubnet;
 
         public override string ToString()
         {
@@ -42,6 +43,7 @@ namespace RealAntennas
             RevAntennaRx = source.RevAntennaRx;
             FwdMetric = source.FwdMetric;
             RevMetric = source.RevMetric;
+            //LinkSubnet = source.LinkSubnet;
         }
 
         public void SwapEnds()

@@ -398,3 +398,6 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+/GameData.lnk
+/GameData.lnk
+/GameData.lnk
