@@ -33,14 +33,22 @@ namespace RealAntennas
         public float Gain;          // Physical directionality, measured in dBi
 
         [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "Transmit Power (dBm)", guiUnits = " dBm", guiFormat = "F1", groupName = PAWGroup),
-        UI_FloatRange(maxValue = 60, minValue = 0, stepIncrement = 1, scene = UI_Scene.Editor)]
+        UI_FloatRange(maxValue = 60, minValue = 0, stepIncrement = 1, scene = UI_Scene.All)]
         public float TxPower = 30;       // Transmit Power in dBm (milliwatts)
+
+        // Read-only display used when slider is hidden
+        [KSPField(guiActive = true, guiActiveEditor = false, guiName = "Transmit Power", groupName = PAWGroup, groupDisplayName = PAWGroup)]
+        public string TxPowerDisplay = string.Empty;
 
         [KSPField] protected float MaxTxPower = 60;    // Per-part max setting for TxPower
 
         [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "Tech Level", guiFormat = "N0", groupName = PAWGroup),
         UI_FloatRange(minValue = 0f, stepIncrement = 1f, scene = UI_Scene.Editor)]
         private float TechLevel = -1f;
+
+        [KSPField(guiActive = false, guiActiveEditor = false, guiName = "Tech Level", groupName = PAWGroup, groupDisplayName = PAWGroup)]
+        public string TechLevelDisplay = String.Empty;
+
         private int techLevel => Convert.ToInt32(TechLevel);
 
         [KSPField] private int maxTechLevel = 0;
@@ -51,8 +59,12 @@ namespace RealAntennas
         [KSPField] public bool applyMassModifier = true;
 
         [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "RF Band", groupName = PAWGroup),
-         UI_ChooseOption(scene = UI_Scene.Editor)]
+         UI_ChooseOption(scene = UI_Scene.All)]
         public string RFBand = "S";
+
+        // Read-only display used when option selector is hidden
+        [KSPField(guiActive = true, guiActiveEditor = false, guiName = "RFBand", groupName = PAWGroup, groupDisplayName = PAWGroup)]
+        public string RFBandDisplay = String.Empty;
 
         public Antenna.BandInfo RFBandInfo => Antenna.BandInfo.All[RFBand];
 
@@ -86,6 +98,13 @@ namespace RealAntennas
         private float DefaultPacketInterval = 1.0f;
         private bool scienceMonitorActive = false;
         private int actualMaxTechLevel = 0;
+
+        private const float evaInteractionRange = 2.0f;
+
+        // --- UI refresh control ---
+        private bool _uiDirty = true;
+        private bool _lastEVAEditState = false;
+        private AntennaCondition _lastCondition = AntennaCondition.Enabled;
 
         public float PowerDraw => RATools.LogScale(PowerDrawLinear);
         public float PowerDrawLinear => RATools.LinearScale(TxPower) / RAAntenna.PowerEfficiency;
@@ -150,6 +169,7 @@ namespace RealAntennas
             SetupBaseFields();
             Fields[nameof(_enabled)].uiControlEditor.onFieldChanged = OnAntennaEnableChange;
             (Fields[nameof(TxPower)].uiControlEditor as UI_FloatRange).maxValue = MaxTxPower;
+            (Fields[nameof(TxPower)].uiControlFlight as UI_FloatRange).maxValue = MaxTxPower;
 
             _enabled = Condition != AntennaCondition.Disabled;
 
@@ -181,19 +201,61 @@ namespace RealAntennas
             ConfigBandOptions();
             SetupIdlePower();
             RecalculateFields();
-            SetFieldVisibility();
             ApplyTLColoring();
 
+            // Hook settings applied only when we are not disabled/perma-shutdown.
             if (HighLogic.LoadedSceneIsFlight)
             {
-                isEnabled = Condition != AntennaCondition.Disabled;
-                if (isEnabled)
+                if (Condition != AntennaCondition.Disabled && Condition != AntennaCondition.PermanentShutdown)
                     GameEvents.OnGameSettingsApplied.Add(ApplyGameSettings);
             }
             else if (HighLogic.LoadedSceneIsEditor)
             {
                 GameEvents.OnPartUpgradePurchased.Add(OnPartUpgradePurchased);
             }
+
+            // initialize UI caches
+            _lastEVAEditState = HighLogic.LoadedSceneIsFlight && IsEVAEngineerNearby();
+            _lastCondition = Condition;
+            MarkUIRefresh();
+            RefreshPAWIfDirty();
+        }
+
+        public override void OnUpdate()
+        {
+            if (!HighLogic.LoadedSceneIsFlight) return;
+
+            bool evaEngineerNearby = IsEVAEngineerNearby();
+            if (evaEngineerNearby != _lastEVAEditState)
+            {
+                _lastEVAEditState = evaEngineerNearby;
+                MarkUIRefresh();
+            }
+
+            if (Condition != _lastCondition)
+            {
+                _lastCondition = Condition;
+                // If Condition changes externally, ensure power gating matches
+                SetupIdlePower();
+                MarkUIRefresh();
+            }
+            RefreshPAWIfDirty();
+        }
+
+        private void MarkUIRefresh() => _uiDirty = true;
+
+        private void RefreshPAWIfDirty()
+        {
+            if (!_uiDirty) return;
+            _uiDirty = false;
+
+            ApplyUIState();
+            MonoUtilities.RefreshPartContextWindow(part);
+        }
+
+        private void ApplyUIState()
+        {
+            SetFieldVisibility();
         }
 
         private void SetupIdlePower()
@@ -231,12 +293,17 @@ namespace RealAntennas
             double idleDraw = RAAntenna.IdlePowerDraw * 1000;
             sIdlePowerConsumed = $"{idleDraw:F2} Watts";
             sActivePowerConsumed = $"{idleDraw + (PowerDrawLinear / 1000):F2} Watts";
+            TxPowerDisplay = $"{TxPower:F1} dBm";
+            RFBandDisplay = $"{RFBand}-Band";
+            TechLevelDisplay = $"{TechLevel:N0}";
             int ModulationBits = (RAAntenna as RealAntennaDigital).modulator.ModulationBitsFromTechLevel(TechLevel);
             (RAAntenna as RealAntennaDigital).modulator.ModulationBits = ModulationBits;
 
             RecalculatePlannerECConsumption();
             if (plannerGUI is PlannerGUI)
                 plannerGUI.RequestUpdate = true;
+
+            MarkUIRefresh();
         }
 
         private void SetupBaseFields()
@@ -251,10 +318,24 @@ namespace RealAntennas
         private void SetFieldVisibility()
         {
             bool showFields = Condition != AntennaCondition.Disabled && Condition != AntennaCondition.PermanentShutdown;
+
+            ApplyCommonVisibility(showFields);
+
+            if (HighLogic.LoadedSceneIsFlight)
+                ApplyFlightEVAManipulationVisibility(showFields);
+            else
+                ApplyNonFlightVisibility(showFields);
+        }
+
+        private void ApplyCommonVisibility(bool showFields)
+        {
             Fields[nameof(Gain)].guiActiveEditor = Fields[nameof(Gain)].guiActive = showFields;
-            Fields[nameof(TxPower)].guiActiveEditor = Fields[nameof(TxPower)].guiActive = showFields;
-            Fields[nameof(TechLevel)].guiActiveEditor = Fields[nameof(TechLevel)].guiActive = showFields;
-            Fields[nameof(RFBand)].guiActiveEditor = Fields[nameof(RFBand)].guiActive = showFields;
+            Fields[nameof(TxPower)].guiActiveEditor = showFields;
+            Fields[nameof(TxPowerDisplay)].guiActiveEditor = false;
+            Fields[nameof(TechLevel)].guiActiveEditor = showFields;
+            Fields[nameof(TechLevelDisplay)].guiActiveEditor = false;
+            Fields[nameof(RFBand)].guiActiveEditor = showFields;
+            Fields[nameof(RFBandDisplay)].guiActiveEditor = false;
             Fields[nameof(sActivePowerConsumed)].guiActiveEditor = Fields[nameof(sActivePowerConsumed)].guiActive = showFields;
             Fields[nameof(sIdlePowerConsumed)].guiActiveEditor = Fields[nameof(sIdlePowerConsumed)].guiActive = showFields;
             Fields[nameof(sAntennaTarget)].guiActive = showFields;
@@ -268,6 +349,72 @@ namespace RealAntennas
             Events[nameof(DebugAntenna)].guiActive = showFields;
         }
 
+        private void ApplyFlightEVAManipulationVisibility(bool showFields)
+        {
+            bool antennaInteractable = showFields && IsEVAEngineerNearby();
+
+            // TxPower slider vs display
+            Fields[nameof(TxPower)].guiActive = antennaInteractable;
+            Fields[nameof(TxPower)].guiInteractable = antennaInteractable;
+            if (Fields[nameof(TxPower)].uiControlFlight != null)
+                Fields[nameof(TxPower)].uiControlFlight.controlEnabled = antennaInteractable;
+            Fields[nameof(TxPowerDisplay)].guiActive = showFields && !antennaInteractable;
+            Fields[nameof(TxPowerDisplay)].guiInteractable = false;
+            Fields[nameof(TxPower)].guiActiveUnfocused = antennaInteractable;
+            Fields[nameof(TxPower)].guiUnfocusedRange = evaInteractionRange;
+
+            // RFBand option vs display
+            Fields[nameof(RFBand)].guiActive = antennaInteractable;
+            Fields[nameof(RFBand)].guiInteractable = antennaInteractable;
+            if (Fields[nameof(RFBand)].uiControlFlight != null)
+                Fields[nameof(RFBand)].uiControlFlight.controlEnabled = antennaInteractable;
+            Fields[nameof(RFBandDisplay)].guiActive = showFields && !antennaInteractable;
+            Fields[nameof(RFBandDisplay)].guiInteractable = false;
+            Fields[nameof(RFBand)].guiActiveUnfocused = antennaInteractable;
+            Fields[nameof(RFBand)].guiUnfocusedRange = evaInteractionRange;
+
+            // TechLevel display only (read-only in flight)
+            Fields[nameof(TechLevel)].guiActive = false;
+            Fields[nameof(TechLevel)].guiActiveUnfocused = false;
+            Fields[nameof(TechLevelDisplay)].guiActive = showFields;
+            Fields[nameof(TechLevelDisplay)].guiActiveUnfocused = antennaInteractable;
+            Fields[nameof(TechLevelDisplay)].guiUnfocusedRange = evaInteractionRange;
+
+            bool showUpgradeButton = antennaInteractable && (techLevel < GetResearchedMaxTechLevel());
+            Events[nameof(EVAUpgradeTechLevel)].guiActiveUnfocused = showUpgradeButton;
+            Events[nameof(EVAUpgradeTechLevel)].unfocusedRange = evaInteractionRange;
+        }
+
+        private void ApplyNonFlightVisibility(bool showFields)
+        {
+            // In editor: show actual controls, hide displays
+            Fields[nameof(TxPower)].guiActive = showFields;
+            Fields[nameof(TxPowerDisplay)].guiActive = false;
+            Fields[nameof(RFBand)].guiActive = showFields;
+            Fields[nameof(RFBandDisplay)].guiActive = false;
+            Fields[nameof(TechLevel)].guiActive = showFields;
+            Fields[nameof(TechLevelDisplay)].guiActive = false;
+            Events[nameof(EVAUpgradeTechLevel)].active = false;
+            Events[nameof(EVAUpgradeTechLevel)].guiActiveUnfocused = false;
+        }
+
+        private bool IsEVAEngineerNearby()
+        {
+            if (!HighLogic.CurrentGame.Parameters.CustomParams<RAParameters>().allowEVAAntennaEdit)
+                return false;
+            if (Condition == AntennaCondition.Disabled || Condition == AntennaCondition.PermanentShutdown)
+                return false;
+            return GetNearbyEVAEngineer() != null;
+        }
+
+        private Vessel GetNearbyEVAEngineer()
+        {
+            return FlightGlobals.VesselsLoaded.FirstOrDefault(vessel =>
+                vessel.isEVA &&
+                vessel.GetVesselCrew().FirstOrDefault()?.trait == "Engineer" &&
+                Vector3.Distance(vessel.transform.position, part.transform.position) <= evaInteractionRange);
+        }
+
         private void SetupUICallbacks()
         {
             Fields[nameof(TechLevel)].uiControlEditor.onFieldChanged = OnTechLevelChange;
@@ -275,6 +422,11 @@ namespace RealAntennas
             Fields[nameof(RFBand)].uiControlEditor.onFieldChanged = OnRFBandChange;
             Fields[nameof(TxPower)].uiControlEditor.onFieldChanged = OnTxPowerChange;
             Fields[nameof(plannerActiveTxTime)].uiControlEditor.onFieldChanged += OnPlannerActiveTxTimeChanged;
+            if (HighLogic.LoadedSceneIsFlight)
+            {
+                Fields[nameof(RFBand)].uiControlFlight.onFieldChanged = OnRFBandChange;
+                Fields[nameof(TxPower)].uiControlFlight.onFieldChanged = OnTxPowerChange;
+            }
         }
 
         private void UpdateMaxTechLevelInUI()
@@ -291,8 +443,10 @@ namespace RealAntennas
         private void OnAntennaEnableChange(BaseField field, object obj)
         {
             Condition = _enabled ? AntennaCondition.Enabled : AntennaCondition.Disabled;
-            SetFieldVisibility();
+            SetupIdlePower();
             RecalculatePlannerECConsumption();
+            MarkUIRefresh();
+            RefreshPAWIfDirty();
         }
         private void OnRFBandChange(BaseField f, object obj) => RecalculateFields();
         private void OnTxPowerChange(BaseField f, object obj) => RecalculateFields();
@@ -302,7 +456,7 @@ namespace RealAntennas
             string oldBand = RFBand;
             ConfigBandOptions();
             RecalculateFields();
-            if (!oldBand.Equals(RFBand)) MonoUtilities.RefreshPartContextWindow(part);
+            if (!oldBand.Equals(RFBand)) MarkUIRefresh();
         }
 
         private void OnTechLevelChangeSymmetry(BaseField f, object obj) => ConfigBandOptions();
@@ -323,11 +477,12 @@ namespace RealAntennas
         {
             _enabled = false;
             Condition = AntennaCondition.PermanentShutdown;
-            SetFieldVisibility();
             SetupIdlePower();
             GameEvents.onVesselWasModified.Fire(vessel);    // Need to notify RACommNetVessel about disabling antennas
             if (vessel.connection is RACommNetVessel RACNV)
                 RACNV.DiscoverAntennas();
+            MarkUIRefresh();
+            RefreshPAWIfDirty();
         }
 
         private void ApplyGameSettings()
@@ -348,6 +503,7 @@ namespace RealAntennas
                 if (!RATools.RP1Found) maxTechLevel = actualMaxTechLevel;
                 UpdateMaxTechLevelInUI();
                 ApplyTLColoring();
+                MarkUIRefresh();
             }
         }
 
@@ -371,11 +527,22 @@ namespace RealAntennas
                 availableBandDisplayNames.Add($"{bi.name}-Band");
             }
 
-            UI_ChooseOption op = (UI_ChooseOption)Fields[nameof(RFBand)].uiControlEditor;
-            op.options = availableBands.ToArray();
-            op.display = availableBandDisplayNames.ToArray();
-            if (op.options.IndexOf(RFBand) < 0)
-                RFBand = op.options[op.options.Length - 1];
+            if (HighLogic.LoadedSceneIsEditor)
+            {
+                UI_ChooseOption op = (UI_ChooseOption)Fields[nameof(RFBand)].uiControlEditor;
+                op.options = availableBands.ToArray();
+                op.display = availableBandDisplayNames.ToArray();
+                if (op.options.IndexOf(RFBand) < 0)
+                    RFBand = op.options[op.options.Length - 1];
+            }
+            else if (HighLogic.LoadedSceneIsFlight)
+            {
+                UI_ChooseOption opFlight = (UI_ChooseOption)Fields[nameof(RFBand)].uiControlFlight;
+                opFlight.options = availableBands.ToArray();
+                opFlight.display = availableBandDisplayNames.ToArray();
+                if (opFlight.options.IndexOf(RFBand) < 0)
+                    RFBand = opFlight.options[opFlight.options.Length - 1];
+            }
         }
 
         public override string GetModuleDisplayName() => "RealAntenna";
@@ -389,7 +556,8 @@ namespace RealAntennas
                     float tGain = (antennaDiameter > 0) ? Physics.GainFromDishDiamater(antennaDiameter, band.Frequency, RAAntenna.AntennaEfficiency) : Physics.GainFromReference(referenceGain, referenceFrequency * 1e6f, band.Frequency);
                     res += $"<color=green><b>{band.name}</b></color>: {tGain:F1} dBi, {Physics.Beamwidth(tGain):F1} beamwidth\n";
                 }
-            } else
+            }
+            else
             {
                 res = $"<color=green>Omni-directional</color>: {Gain:F1} dBi";
             }
@@ -405,6 +573,14 @@ namespace RealAntennas
         //                  -> OnStartTransmission() -> queueVesselData(), transmitQueuedData()
         // (Science) -> TransmitData() -> TransmitQueuedData()
 
+        public override bool CanTransmit()
+        {
+            if (Condition != AntennaCondition.Enabled) return false;
+            if (Deployable && !Deployed) return false;
+            SetTransmissionParams();
+            return base.CanTransmit();
+        }
+
         internal void SetTransmissionParams()
         {
             if (RACommNetScenario.CommNetEnabled && this?.vessel?.Connection?.Comm is RACommNode node)
@@ -417,12 +593,6 @@ namespace RealAntennas
                 Debug.Log($"{ModTag} Setting transmission params: rate: {data_rate:F1}, interval: {packetInterval:F1}s, rescale: {StockRateModifier:N5}, size: {packetSize:N6}");
             }
         }
-        public override bool CanTransmit()
-        {
-            SetTransmissionParams();
-            return base.CanTransmit();
-        }
-
         public override void TransmitData(List<ScienceData> dataQueue)
         {
             SetTransmissionParams();
@@ -472,7 +642,7 @@ namespace RealAntennas
 
         #region Cost and Mass Modifiers
         public float GetModuleCost(float defaultCost, ModifierStagingSituation sit) =>
-            Condition != AntennaCondition.Disabled ? RAAntenna.TechLevelInfo.BaseCost + (RAAntenna.TechLevelInfo.CostPerWatt * RATools.LinearScale(TxPower)/1000) : 0;
+            Condition != AntennaCondition.Disabled ? RAAntenna.TechLevelInfo.BaseCost + (RAAntenna.TechLevelInfo.CostPerWatt * RATools.LinearScale(TxPower) / 1000) : 0;
         public float GetModuleMass(float defaultMass, ModifierStagingSituation sit) =>
             Condition != AntennaCondition.Disabled && applyMassModifier ? (RAAntenna.TechLevelInfo.BaseMass + (RAAntenna.TechLevelInfo.MassPerWatt * RATools.LinearScale(TxPower) / 1000)) / 1000 : 0;
         public ModifierChangeWhen GetModuleCostChangeWhen() => ModifierChangeWhen.FIXED;
@@ -563,6 +733,82 @@ namespace RealAntennas
         {
             TechLevelInfo tlInf = TechLevelInfo.GetTechLevel(techLevel);
             return PartUpgradeManager.Handler.GetUpgrade(tlInf.name);
+        }
+        #endregion
+
+        #region Upgrade Tech Level with EVA Engineer
+        [KSPEvent(active = true, guiActive = false, guiActiveUnfocused = true, unfocusedRange = evaInteractionRange, externalToEVAOnly = true, guiName = "Upgrade Tech Level: Repair Kits required", groupName = PAWGroup)]
+        public void EVAUpgradeTechLevel()
+        {
+            Vessel evaEngineer = GetNearbyEVAEngineer();
+            if (evaEngineer == null) return;
+
+            ModuleInventoryPart inventory = evaEngineer.FindPartModuleImplementing<ModuleInventoryPart>();
+            int kitsAvailable = 0;
+            if (inventory != null)
+            {
+                foreach (StoredPart slot in inventory.storedParts.Values)
+                {
+                    if (slot.partName == "evaRepairKit")
+                        kitsAvailable += slot.quantity;
+                }
+            }
+
+            if (kitsAvailable <= 0)
+            {
+                ScreenMessages.PostScreenMessage(
+                    "No repair kits available — antenna upgrade requires repair kits.",
+                    5f, ScreenMessageStyle.UPPER_CENTER);
+                return;
+            }
+
+            int levelsToMax = GetResearchedMaxTechLevel() - techLevel;
+            int affordableLevels = kitsAvailable * 2;
+            int actualLevelsGained = Mathf.Min(levelsToMax, affordableLevels);
+            int kitsRequired = Mathf.CeilToInt(actualLevelsGained / 2f);
+
+            inventory.RemoveNPartsFromInventory("evaRepairKit", kitsRequired);
+
+            int newTechLevel = Math.Min(techLevel + actualLevelsGained, GetResearchedMaxTechLevel());
+            ApplyTechLevelChange(newTechLevel, kitsAvailable, kitsRequired, levelsToMax, actualLevelsGained);
+        }
+        private int GetResearchedMaxTechLevel()
+        {
+            int maxResearched = 0;
+            for (int tl = 0; tl <= TechLevelInfo.MaxTL; tl++)
+            {
+                TechLevelInfo tlInf = TechLevelInfo.GetTechLevel(tl);
+                if (tlInf == null) break;
+                PartUpgradeHandler.Upgrade upgd = PartUpgradeManager.Handler.GetUpgrade(tlInf.name);
+                if (tl == 0 || (upgd != null && PartUpgradeManager.Handler.IsUnlocked(upgd.name)))
+                    maxResearched = tl;
+                else
+                    break;
+            }
+            return maxResearched;
+        }
+
+        private void ApplyTechLevelChange(int newTL, int kitsAvailable, int kitsRequired, int levelsToMax, int actualLevelsGained)
+        {
+            TechLevel = newTL;
+
+            ApplyTLColoring();
+            ConfigBandOptions();
+            RecalculateFields();
+            SetupIdlePower();
+
+            GameEvents.onVesselWasModified.Fire(vessel);
+            if (vessel?.connection is RACommNetVessel racnv)
+                racnv.DiscoverAntennas();
+
+            MarkUIRefresh();
+            RefreshPAWIfDirty();
+
+            string resultMessage = (actualLevelsGained < levelsToMax)
+                ? $"Antenna upgraded to Tech Level {newTL} (partial — needed {Mathf.CeilToInt(levelsToMax / 2f)} kits, had {kitsAvailable}). \n{kitsRequired} kit(s) consumed."
+                : $"Antenna upgraded to Tech Level {newTL}. \n{kitsRequired} repair kit(s) consumed.";
+
+            ScreenMessages.PostScreenMessage(resultMessage, 10f, ScreenMessageStyle.UPPER_CENTER);
         }
         #endregion
     }
