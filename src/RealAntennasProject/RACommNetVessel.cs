@@ -16,7 +16,7 @@ namespace RealAntennas
         readonly List<CommNet.ModuleProbeControlPoint> probeControlPoints = new List<CommNet.ModuleProbeControlPoint>();
         public IReadOnlyList<RealAntenna> InactiveAntennas => inactiveAntennas;
         private PartResourceDefinition electricChargeDef;
-
+        
         [KSPField(isPersistant = true)] public bool powered = true;
 
         public override IScienceDataTransmitter GetBestTransmitter() =>

@@ -28,7 +28,7 @@ namespace RealAntennas
                 gain = RATools.LogScale(9.87f * efficiency * diameter * diameter / (wavelength * wavelength));
             }
             return gain;
-        } 
+        }
         public static float GainFromReference(float refGain, float refFreq, float newFreq)
         {
             float gain = 0;
@@ -98,7 +98,7 @@ namespace RealAntennas
             float LossFactor = RATools.LinearScale(Atheta);  // typical values = 1.01 to 2.0 (A = 0.04 dB to 3 dB) 
             float meanTemp = AtmosphereMeanEffectiveTemp(CD);
             float result = meanTemp * (1 - (1 / LossFactor));
-//            Debug.LogFormat("AtmosphereNoiseTemperature calc for elevation {0:F2} freq {1:F2}GHz yielded attenuation {2:F2}, LossFactor {3:F2} and mean temp {4:F2} for result {5:F2}", elevationAngle, frequency/1e9, Atheta, LossFactor, meanTemp, result);
+            //            Debug.LogFormat("AtmosphereNoiseTemperature calc for elevation {0:F2} freq {1:F2}GHz yielded attenuation {2:F2}, LossFactor {3:F2} and mean temp {4:F2} for result {5:F2}", elevationAngle, frequency/1e9, Atheta, LossFactor, meanTemp, result);
             return result;
         }
         public static float AtmosphereAttenuation(float CD, float elevationAngle, float frequency =1e9f)
@@ -133,7 +133,7 @@ namespace RealAntennas
             return math.pow((float) val, 0.25f);
         }
 
-        public static float BodyBaseTemperature(CelestialBody body) 
+        public static float BodyBaseTemperature(CelestialBody body)
             => body.atmosphere ? (float)body.GetTemperature(1) : GetEquilibriumTemperature(body) + (float)body.coreTemperatureOffset;
 
         //double baseTemp = body.atmosphere ? body.GetTemperature(1) : GetEquilibriumTemperature(body) + body.coreTemperatureOffset;
@@ -329,5 +329,181 @@ namespace RealAntennas
             }
             return temp;
         }
+
+        #region Plasma attenuation model
+        // ── Physics background ──────────────────────────────────────────────────────
+        // During hypersonic atmospheric entry a shock-heated plasma sheath can form
+        // around the vehicle. This sheath can attenuate and/or reflect RF signals.
+        //
+        // A commonly cited collisional-plasma attenuation-rate expression has the form:
+        //
+        //   attenuation rate ∝ fp² / (f² - fp²)
+        //
+        // where fp is the plasma frequency and f is the communication frequency.
+        // In the high-frequency limit (f >> fp), this behaves approximately like 1/f²:
+        // lower-frequency links are generally affected more strongly than higher-
+        // frequency links.
+        //
+        // This code does NOT evaluate the full plasma-dispersion relation directly.
+        // Instead, it applies a configurable empirical attenuation fit that preserves
+        // the intended gameplay behavior:
+        //   - low-frequency links degrade strongly
+        //   - higher-frequency links degrade less
+        //   - degradation is gradual rather than binary
+        //
+        // ── Reference flight data (RAM-C programme, NASA) ───────────────────────────
+        // Source 1:  "Causes and Mitigation of Radio Frequency (RF) Blackout During
+        //             Reentry", Gillman et al., NASA/TP-2010-216745.
+        // Source 2:  NASA TN D-5615 (1970).
+        // Source 3:  EUCASS 2022, paper 6128.
+        // Source 4:  Zhou et al., AIP Advances 7, 105314 (2017).
+        // ── Reference observations ──────────────────────────────────────────────────
+        // RAM-C flight results and later blackout reviews consistently indicate that
+        // higher frequencies perform substantially better through reentry plasma than
+        // lower frequencies. X-band persisted much deeper into the blackout region than
+        // VHF, and even higher frequencies performed better still, but higher frequency
+        // does not imply zero plasma interaction.
+        //
+        // ── Applied gameplay model ──────────────────────────────────────────────────
+        // One-way sheath attenuation is modeled as:
+        //
+        //   peakDB(f) = A_ref * (f_ref / f)^n
+        //   attenuationDB(f, severity) = peakDB(f) * severity
+        //
+        // where:
+        //   f_ref     = reference frequency
+        //   A_ref     = one-way peak attenuation at f_ref and severity = 1
+        //   n         = configurable frequency exponent
+        //   severity  = plasmaSeverity ∈ [0, 1]
+        //
+        //   Default (RO/RSS): f_ref = 137 MHz (VHF), A_ref = 50 dB — RAM-C calibrated.
+        //   Default (Stock):  f_ref = 1620 MHz (L-band), A_ref = 70 dB — Kerbin-scaled.
+        //     Stock mapping: L-band plays the role VHF plays in RO.  The lowest available
+        //     stock band receives the same peak blackout severity that VHF receives at
+        //     Earth reentry speeds, compensating for Kerbin's lower orbital velocity
+        //     (~2,300 m/s vs ~7,700 m/s for Earth LEO).
+        //   n = 1.7 empirical fit; pure collision-dominated theory gives n = 2.0.
+        //
+        // Receiver-side plasma thermal noise is then derived from the modeled
+        // attenuation using Kirchhoff-style absorption:
+        //
+        //   T_noise = PlasmaElectronTemp * (1 - 10^(-attenDB / 10))
+        //
+        // ── Severity model ──────────────────────────────────────────────────────────
+        // For loaded vessels, severity is derived from the ratio:
+        //
+        //   ratio = vessel.externalTemperature / PhysicsGlobals.CommNetBlackoutThreshold
+        //
+        // and passed through a smoothstep window.
+        //
+        // This anchors the gradual RA degradation curve to KSP's stock plasma threshold:
+        // at ratio = 1.0, the vessel is at the stock CommNet blackout threshold, while
+        // RA can begin degrading earlier and continue degrading beyond that point.
+        //
+        // For unloaded vessels, no plasma severity is currently modeled.
+        //
+        // ── Link-budget use ─────────────────────────────────────────────────────────
+        // PlasmaAttenuationDB() returns one-way attenuation through a single sheath
+        // crossing. In the RA link budget, this can be applied:
+        //   - on transmit (Tx-side attenuation)
+        //   - on receive (Rx-side attenuation)
+        //   - and as additional receiver-side plasma noise
+        //
+        // All plasma parameters are loaded from RealAntennasCommNetParams.cfg via
+        // InitPlasma(), so installs can retune the model without code changes.
+        // ────────────────────────────────────────────────────────────────────────────
+        
+        // Loaded from config in InitPlasma().  Defaults match the stock Kerbin-scaled model.
+        public static double PlasmaAtten_RefFreqHz = 1620e6; // Hz  — stock default: L-band
+        public static double PlasmaAtten_RefPeakDB = 70.0;   // dB  — stock default
+        public static double PlasmaAtten_FreqExponent = 1.7;    // empirical fit; pure theory = 2.0
+        public static float PlasmaElectronTemp = 8000f;  // K   — RAM-C measured
+
+        // Smoothstep window expressed as RATIOS of PhysicsGlobals.CommNetBlackoutThreshold.
+        // Using ratios ties the transition directly to KSP's own plasma parameter so the
+        // model stays correct for any body or mod that changes the threshold.
+        //
+        //   ratio = vessel.externalTemperature / PhysicsGlobals.CommNetBlackoutThreshold
+        //
+        // At ratio = 1.0, stock KSP's binary InPlasma becomes true.
+        // With window [0.5, 1.5], the stock trigger falls exactly at the midpoint:
+        //   ratio < 0.5  → no effect (pre-plasma)
+        //   ratio = 1.0  → severity 0.5  (stock InPlasma just fired, half-degraded)
+        //   ratio ≥ 1.5  → full blackout
+        public static float PlasmaHeat_OnsetRatio = 0.5f; // ratio at plasma onset
+        public static float PlasmaHeat_PeakRatio = 1.5f; // ratio at full blackout
+
+        /// <summary>
+        /// Loads plasma model parameters from the RealAntennasCommNetParams config node.
+        /// Called from RACommNetScenario.Initialize() alongside BandInfo.Init() etc.
+        /// Absent values leave the existing default intact, so partial configs work.
+        /// </summary>
+        public static void InitPlasma(ConfigNode config)
+        {
+            double d = 0; float f = 0;
+            if (config.TryGetValue("PlasmaRefFreqMHz", ref d)) PlasmaAtten_RefFreqHz = d * 1e6;
+            if (config.TryGetValue("PlasmaRefPeakDB", ref d)) PlasmaAtten_RefPeakDB = d;
+            if (config.TryGetValue("PlasmaFreqExp", ref d)) PlasmaAtten_FreqExponent = d;
+            if (config.TryGetValue("PlasmaElectronTempK", ref f)) PlasmaElectronTemp = f;
+            if (config.TryGetValue("PlasmaHeatOnsetRatio", ref f)) PlasmaHeat_OnsetRatio = f;
+            if (config.TryGetValue("PlasmaHeatPeakRatio", ref f)) PlasmaHeat_PeakRatio = f;
+        }
+
+        /// <summary>
+        /// Derives plasma severity in [0, 1] from the normalised plasma ratio:
+        ///   ratio = vessel.externalTemperature / PhysicsGlobals.CommNetBlackoutThreshold
+        ///
+        /// Uses a smoothstep curve between PlasmaHeat_OnsetRatio and PlasmaHeat_PeakRatio.
+        /// Expressing the window as ratios of CommNetBlackoutThreshold means the curve
+        /// tracks KSP's own plasma definition body-agnostically — no per-body config needed.
+        /// At ratio = 1.0 (exactly where stock InPlasma becomes true) severity = 0.5,
+        /// so degradation starts before the binary trigger and continues past it.
+        /// (Gillman 2010 NASA/TP-2010-216745; Apollo TN D-7269.)
+        /// </summary>
+        /// <param name="ratio">vessel.externalTemperature / PhysicsGlobals.CommNetBlackoutThreshold</param>
+        public static float PlasmaHeatSeverity(float ratio)
+        {
+            if (ratio <= PlasmaHeat_OnsetRatio) return 0f;
+            if (ratio >= PlasmaHeat_PeakRatio) return 1f;
+            float t = (ratio - PlasmaHeat_OnsetRatio) / (PlasmaHeat_PeakRatio - PlasmaHeat_OnsetRatio);
+            return t * t * (3f - 2f * t);   // smoothstep
+        }
+
+        /// <summary>
+        /// One-way signal attenuation in dB from the reentry plasma sheath.
+        /// peakDB(f) = RefPeakDB * (RefFreqHz / f)^FreqExponent, scaled by severity.
+        /// </summary>
+        public static float PlasmaAttenuationDB(float freqHz, float plasmaSeverity)
+        {
+            if (plasmaSeverity <= 0f || freqHz <= 0f) return 0f;
+            double freqRatio = PlasmaAtten_RefFreqHz / freqHz;
+            double peakDB = PlasmaAtten_RefPeakDB * Math.Pow(freqRatio, PlasmaAtten_FreqExponent);
+            return (float)Math.Max(0.0, peakDB * plasmaSeverity);
+        }
+
+        /// <summary>
+        /// Noise temperature (K) injected into a receiving antenna by the plasma sheath,
+        /// via Kirchhoff's law:  T_noise = PlasmaElectronTemp * (1 - 10^(-attenDB/10)).
+        /// Applies when the plasma-sheathed vessel is the receiver (uplink direction).
+        /// </summary>
+        public static float PlasmaNoiseTemperature(float freqHz, float plasmaSeverity)
+        {
+            if (plasmaSeverity <= 0f || freqHz <= 0f) return 0f;
+            float attenDB = PlasmaAttenuationDB(freqHz, plasmaSeverity);
+            float absorption = 1f - (float)Math.Pow(10.0, -attenDB / 10.0);
+            return PlasmaElectronTemp * absorption;
+        }
+
+        /// <summary>
+        /// Fallback severity for unloaded vessels: maps the stock binary CommNet plasma
+        /// modifier to [0, 1].  Loaded vessels use PlasmaHeatSeverity instead.
+        ///   stockModifier = 1.0 → severity 0.0 (clear)
+        ///   stockModifier = 0.0 → severity 1.0 (full blackout)
+        ///   intermediate  → severity = 1.0 - stockModifier (future-proof)
+        /// </summary>
+        public static float PlasmaModifierToSeverity(double stockModifier) =>
+            (float)Math.Max(0.0, Math.Min(1.0, 1.0 - stockModifier));
+
+        #endregion
     }
 }
